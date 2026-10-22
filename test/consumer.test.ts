@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, describe } from "node:test";
+import { writeApiSchema } from "../src/lib/schema.ts";
 import {
   buildOpenApiDocument,
   type OpenApiDocument,
@@ -24,7 +24,6 @@ import {
  * required field that disappears, fails here before it reaches a consumer.
  */
 
-const root = fileURLToPath(new URL("..", import.meta.url));
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
 
 /** One fixture and the documented route that produced it. */
@@ -221,16 +220,12 @@ describe("the published consumer schema", () => {
     const dir = mkdtempSync(join(tmpdir(), "payflow-schema-"));
     try {
       const target = join(dir, "api-schema.json");
-      execFileSync(
-        process.execPath,
-        ["--experimental-strip-types", "src/cmd/schema.ts", target],
-        {
-          cwd: root,
-          env: { ...process.env, STELLAR_NETWORK: "testnet", NETWORKS: "" },
-          stdio: "pipe",
-        },
-      );
+      // The same function `npm run schema` calls, without spawning a process
+      // (the CI scanner flags child processes in tests, and the wrapper adds
+      // nothing this does not already exercise).
+      const written = writeApiSchema(target, { STELLAR_NETWORK: "testnet", NETWORKS: "" });
       const artifact = JSON.parse(readFileSync(target, "utf8")) as OpenApiDocument;
+      assert.deepEqual(artifact, written, "the written file is the document that was built");
       assert.equal(artifact.openapi, "3.1.0");
       assert.equal(artifact.info.title, "Payflow API");
       assert.ok("/api/v1/plans" in artifact.paths);
