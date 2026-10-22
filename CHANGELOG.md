@@ -7,6 +7,18 @@ All notable changes to payflow-backend. The format follows
 ## [Unreleased]
 
 ### Added
+- **A versioned API (#173).** Every route is served under `/api/v1/...` and
+  `/api/...` remains an alias, mounted from the same router, so an existing
+  client keeps working and a breaking change lands in the next version. The
+  OpenAPI document lists both surfaces, and the typed client calls `/api/v1`.
+- **A consumer schema artifact (#174).** `npm run schema` writes the OpenAPI
+  3.1 document to `api-schema.json` and CI publishes it as the `api-schema`
+  artifact. `test/consumer.test.ts` validates the golden response fixtures
+  against the documented response schemas, so the published contract and the
+  responses the tests see cannot drift apart.
+- **A dev container (#176).** `.devcontainer/` uses Node 22, runs `npm ci`,
+  installs the Stellar CLI and recommends the project's editor extensions, so
+  a Codespace needs no host setup.
 - **Protocol fee revenue over time (#149).** `GET /api/protocol/fees` sums
   charge fees per `day`, `week` or `month` bucket of ledger close time,
   reading only the requested window through a covering index on
