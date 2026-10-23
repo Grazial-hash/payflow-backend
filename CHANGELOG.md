@@ -7,22 +7,26 @@ All notable changes to payflow-backend. The format follows
 ## [Unreleased]
 
 ### Added
-- **Failing-charge webhooks (#145).** The keeper sends the merchant's
-  webhooks `charge.failing` when a mandate reaches three consecutive failed
-  attempts — a vault-shortfall skip counts — carrying the shortfall and next
-  retry time, and `charge.recovered` when it settles again. The streak is
-  persisted, so each fires once per streak across restarts.
-- **Persisted charge attempts (#144).** Every keeper attempt is recorded in
-  `charge_attempts` (time, result, error code, transaction hash, shortfall,
-  streak and next retry), served at `GET /api/mandates/:id/attempts`, and the
-  backoff is restored from it on startup. Rows older than 90 days are pruned
-  each pass. A vault-shortfall skip now backs off like a failed charge.
-- **Lifetime value (#143).** `GET /api/plans/:id/stats` reports the average
-  and median lifetime value per subscriber net of fee, from one ranked query;
-  `GET /api/merchants/:address/subscribers` reports `ltv` per subscriber.
-- **Cohort retention (#142).** `GET /api/merchants/:address/cohorts` groups
-  mandates by signup bucket and reports the share still active after each
-  later bucket, from `mandate_events` and its ledger close times.
+- **A readable API reference (#162).** `GET /api/docs` renders the OpenAPI
+  document with ReDoc. The page, its bootstrap and the ReDoc bundle are all
+  served by the service, so the reference works offline with no third-party
+  CDN. The CSP is widened only with `worker-src 'self' blob:` for ReDoc's
+  search worker; every other directive stays helmet's default.
+- **The typed client as a standalone npm package (#163).**
+  `@mmm-pay/payflow-client` is built from the same response types as the
+  backend and has no runtime dependencies. It keeps its own version and
+  changelog under `client/`, and `client-v*` releases publish it with npm
+  provenance.
+- **A mandate's charges can be filtered by date (#164).**
+  `GET /api/mandates/:id/charges` accepts `from` and `to`, as unix seconds or
+  ISO 8601 dates (a date covers its whole UTC day), and returns only charges
+  whose ledger close time falls in the inclusive range. A `from` after `to` is
+  `400 invalid_request`, and the filter is served by a
+  `(mandate_id, created_at)` index.
+- **A subscriber's payments can be exported as CSV (#165).**
+  `GET /api/subscribers/:address/charges.csv` streams every settled charge
+  oldest first, with date, merchant, plan, amount, fee and tx hash. Amounts
+  are decimal strings in token units, and `from`/`to` bound the range.
 - **Protocol fee revenue over time (#149).** `GET /api/protocol/fees` sums
   charge fees per `day`, `week` or `month` bucket of ledger close time,
   reading only the requested window through a covering index on

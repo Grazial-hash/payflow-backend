@@ -17,6 +17,7 @@ import { sendApiError } from "./errors.ts";
 import {
   addressSchema,
   cursorSchema,
+  dateBoundSchema,
   idSchema,
   limitSchema,
   mandateStatusSchema,
@@ -166,6 +167,22 @@ export function mandatesRouter(db: DatabaseSync, tokens: TokenMetadataService): 
     if (!id.ok) return;
     const limit = validate(req, res, "limit", limitSchema.optional(), present(req.query.limit));
     if (!limit.ok) return;
+    const from = validate(
+      req,
+      res,
+      "from",
+      dateBoundSchema("from").optional(),
+      present(req.query.from),
+    );
+    if (!from.ok) return;
+    const to = validate(req, res, "to", dateBoundSchema("to").optional(), present(req.query.to));
+    if (!to.ok) return;
+    if (from.value !== undefined && to.value !== undefined && from.value > to.value) {
+      sendApiError(res, req, 400, "invalid_request", "The date range is not valid.", [
+        { path: "from", message: "must not be after `to`" },
+      ]);
+      return;
+    }
 
     // A mandate that does not exist has no charges: the same 404 the
     // mandate's own route answers, so a caller cannot mistake "no such
@@ -175,7 +192,13 @@ export function mandatesRouter(db: DatabaseSync, tokens: TokenMetadataService): 
       return;
     }
 
-    const charges = listMandateCharges(db, id.value, limitOf(limit.value));
+    const charges = listMandateCharges(
+      db,
+      id.value,
+      limitOf(limit.value),
+      from.value,
+      to.value,
+    );
     const body: ChargePage = { charges };
     res.json(body);
   });

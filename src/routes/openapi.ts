@@ -35,6 +35,8 @@ export interface SchemaObject {
   additionalProperties?: boolean | SchemaObject;
   /** A schema that must satisfy every listed schema. */
   allOf?: SchemaObject[];
+  /** A schema that must satisfy exactly one of the listed schemas. */
+  oneOf?: SchemaObject[];
   $ref?: string;
   minimum?: number;
   maximum?: number;
@@ -99,6 +101,40 @@ export interface OpenApiDocument {
 const API_VERSION = "0.2.0";
 
 /**
+ * The human-readable API reference, served at `/api/docs`.
+ *
+ * The page and its scripts are all served by this process: ReDoc's
+ * standalone bundle comes from the npm package at runtime, never from a CDN,
+ * so the documentation works offline and inside a locked-down network. The
+ * bootstrap is an external module rather than an inline script, which keeps
+ * the page compatible with the default `script-src 'self'` policy; it imports
+ * the bundle's `init` export (ReDoc 3 ships an ES module).
+ */
+export const DOCS_HTML = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Payflow API documentation</title>
+    <style>body { margin: 0; padding: 0; }</style>
+  </head>
+  <body>
+    <div id="redoc-container"></div>
+    <script type="module" src="/api/docs/docs.js"></script>
+  </body>
+</html>
+`;
+
+/**
+ * The page's bootstrap script: point ReDoc at the OpenAPI document this
+ * instance serves. ReDoc's own bundle is served beside it.
+ */
+export const DOCS_INIT_SCRIPT = `import { init } from "/api/docs/redoc.standalone.js";
+
+init("/api/openapi.json", {}, document.getElementById("redoc-container"));
+`;
+
+/**
  * The API changelog, which also carries the deprecation policy.
  *
  * It is linked from the document's `externalDocs` so a generated client keeps
@@ -141,6 +177,27 @@ const limitParameter = (): ParameterObject => ({
   required: false,
   description: "How many rows to return. Capped at 200; a larger value is not an error.",
   schema: { type: "integer", minimum: 1, maximum: 200, default: 50 },
+});
+
+/**
+ * A query parameter bounding a range: unix seconds or an ISO 8601
+ * date/date-time, both inclusive at the endpoints. A date-only `from` starts
+ * the day and a date-only `to` ends it, both in UTC.
+ */
+const dateBoundParameter = (name: "from" | "to", description: string): ParameterObject => ({
+  name,
+  in: "query",
+  required: false,
+  description,
+  schema: {
+    oneOf: [
+      { type: "integer", minimum: 0, description: "Unix seconds." },
+      {
+        type: "string",
+        description: "An ISO 8601 date or date-time with a timezone, e.g. `2026-10-01`.",
+      },
+    ],
+  },
 });
 
 /** A query parameter holding a number of days. */
@@ -489,9 +546,15 @@ function apiPaths(root: string): Record<string, PathItemObject> {
       get: {
         tags: ["mandates"],
         summary: "A mandate's settlement history",
-        description: "The charges settled for this mandate, newest first.",
+        description:
+          "The charges settled for this mandate, newest first. `from` and `to` filter by the charge's ledger close time and are both inclusive; `to` covers the whole second. Each accepts unix seconds or an ISO 8601 date/date-time. A date-only `2026-10-01` covers the whole UTC day, while `2026-10-01T12:00:00Z` is that exact instant. A `from` later than `to` is `400 invalid_request`.",
         operationId: `listMandateCharges${operationSuffix(root)}`,
-        parameters: [idParameter(), limitParameter()],
+        parameters: [
+          idParameter(),
+          limitParameter(),
+          dateBoundParameter("from", "Start of the range, inclusive. Unbounded when absent."),
+          dateBoundParameter("to", "End of the range, inclusive. Unbounded when absent."),
+        ],
         responses: {
           "200": {
             description: "The charges.",
@@ -1002,6 +1065,39 @@ function apiPaths(root: string): Record<string, PathItemObject> {
         },
       },
     },
+    [p("/subscribers/{address}/charges.csv")]: {
+      get: {
+        tags: ["subscribers"],
+        summary: "Export a subscriber's payments as CSV",
+        description:
+          "Every settled charge paid by the subscriber, oldest first, as a CSV download (`Content-Disposition: attachment`). Columns: `date` (ledger close time, ISO 8601 UTC), `merchant`, `plan` (the mandate's plan id), `amount` (what the subscriber paid, the charge amount plus the fee), `fee` (the protocol's share) and `tx_hash`. Amounts are in token units with seven decimals. The range is half-open: a charge exactly at `to` is excluded.",
+        operationId: `exportSubscriberCharges${operationSuffix(root)}`,
+        parameters: [
+          addressParameter(),
+          {
+            name: "from",
+            in: "query",
+            required: false,
+            description: "Start of the range, in unix seconds. Unbounded when absent.",
+            schema: { type: "integer", minimum: 0 },
+          },
+          {
+            name: "to",
+            in: "query",
+            required: false,
+            description: "End of the range (exclusive), in unix seconds. Unbounded when absent.",
+            schema: { type: "integer", minimum: 0 },
+          },
+        ],
+        responses: {
+          "200": {
+            description: "The payments, one per row after a header row.",
+            content: { "text/csv": { schema: { type: "string" } } },
+          },
+          "400": invalidRequest(),
+        },
+      },
+    },
     [p("/subscribers/{address}/summary")]: {
       get: {
         tags: ["subscribers"],
@@ -1349,6 +1445,50 @@ function servicePaths(): Record<string, PathItemObject> {
                 schema: { type: "object", description: "An OpenAPI 3.1 document." },
               },
             },
+          },
+        },
+      },
+    },
+    "/api/docs": {
+      get: {
+        tags: ["service"],
+        summary: "Human-readable API documentation",
+        description:
+          "A self-contained HTML page rendering this document with ReDoc. Its scripts are served by this process, so the page works without network access; the only CSP addition ReDoc needs is `worker-src 'self' blob:` for its search worker.",
+        operationId: "getDocs",
+        responses: {
+          "200": {
+            description: "The documentation page.",
+            content: { "text/html": { schema: { type: "string" } } },
+          },
+        },
+      },
+    },
+    "/api/docs/redoc.standalone.js": {
+      get: {
+        tags: ["service"],
+        summary: "The self-hosted ReDoc bundle",
+        description:
+          "ReDoc's standalone browser bundle, served from this process so `/api/docs` never reaches a third-party CDN.",
+        operationId: "getDocsRedocBundle",
+        responses: {
+          "200": {
+            description: "The ReDoc JavaScript bundle.",
+            content: { "text/javascript": { schema: { type: "string" } } },
+          },
+        },
+      },
+    },
+    "/api/docs/docs.js": {
+      get: {
+        tags: ["service"],
+        summary: "The documentation bootstrap",
+        description: "Points ReDoc at `/api/openapi.json`.",
+        operationId: "getDocsScript",
+        responses: {
+          "200": {
+            description: "The bootstrap JavaScript.",
+            content: { "text/javascript": { schema: { type: "string" } } },
           },
         },
       },

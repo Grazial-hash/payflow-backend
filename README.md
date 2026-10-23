@@ -364,13 +364,14 @@ When extra networks are configured (see below), every route also answers under
 | `GET` | `/ready` | Readiness probe: `200 ready` once caught up, `503` (`starting`/`catching_up`) while behind |
 | `GET` | `/metrics` | Prometheus metrics: the indexer's gauges, the business gauges (active mandates, active merchants, MRR per network) and the keeper's counters (only when `METRICS_ENABLED=true`) |
 | `GET` | `/api/openapi.json` | The OpenAPI 3.1 description of this API |
+| `GET` | `/api/docs` | Human-readable API reference, rendered by a self-hosted ReDoc bundle |
+| `GET` | `/api/plans?merchant=&limit=` | Published plans |
 | `GET` | `/api/plans?merchant=&limit=&sort=` | Published plans, each with its merchant's self-declared `merchantName`; `sort=subscribers` ranks them by active mandates (ties by plan id) |
 | `GET` | `/api/plans/:id` | One plan |
 | `GET` | `/api/plans/:id/stats` | Per-plan statistics: active and total mandates, cancellations, total collected, average charges per mandate, average and median lifetime value per subscriber net of fee |
 | `GET` | `/api/mandates?ids=&subscriber=&merchant=&status=` | Mandates |
 | `GET` | `/api/mandates/:id` | One mandate |
-| `GET` | `/api/mandates/:id/charges` | Settlement history |
-| `GET` | `/api/mandates/:id/attempts?limit=` | The keeper's charge attempts (last 90 days): result, error code, tx hash, shortfall and backoff, newest first |
+| `GET` | `/api/mandates/:id/charges?from=&to=` | Settlement history, optionally bounded by ledger close time |
 | `GET` | `/api/stream?merchant=&subscriber=` | Server-sent `charged`, `subscribed`, `cancelled` and `mandate_ended` events (25-second heartbeat) |
 | `POST` | `/api/webhooks` | Register a URL to receive signed `charged` events; proves control of the merchant address with a signature |
 | `POST` | `/api/webhooks/:id/rotate` | Replace a webhook's signing secret; both secrets sign during the overlap |
@@ -392,6 +393,7 @@ When extra networks are configured (see below), every route also answers under
 | `GET` | `/api/merchants/:address/revenue?bucket=day&from=&to=` | Revenue over time: gross, fee and net per bucket |
 | `GET` | `/api/merchants/:address/forecast?days=30` | Projected charges over the next N days, net of fees |
 | `GET` | `/api/subscribers/:address/summary` | Mandates and total paid |
+| `GET` | `/api/subscribers/:address/charges.csv?from=&to=` | CSV of the subscriber's payments: date, merchant, plan, amount, fee and tx hash |
 | `GET` | `/api/subscribers/:address/upcoming?days=30` | Charges due over the next N days, with projected times |
 | `GET` | `/api/stats` | Protocol totals, charge volume, fees and last indexed ledger |
 
@@ -399,6 +401,19 @@ When extra networks are configured (see below), every route also answers under
 mandate ids (`?ids=1,2,3`). Ids that do not exist are omitted; more than 100
 ids returns `400` with `error.code = "too_many_ids"` and a non-numeric id
 returns `400` with `error.code = "invalid_ids"`.
+
+`/api/mandates/:id/charges` accepts `from` and `to`, either as unix seconds or
+as an ISO 8601 date/date-time (`2026-10-01` covers that whole UTC day). Both
+bounds are **inclusive**, and `to` covers the whole second. A `from` later than
+`to`, or a value that is neither form, is `400 invalid_request` with the
+parameter named in `error.details`.
+
+`/api/subscribers/:address/charges.csv` streams every payment the subscriber
+made as a CSV download, oldest first: `date`, `merchant`, `plan`, `amount`,
+`fee` and `tx_hash`. `amount` is what the subscriber paid (the charge plus the
+fee), `fee` is the protocol's share, and both have seven decimals. `plan` is
+the plan id. `from` and `to` are optional unix-second bounds, half-open like
+the merchant export.
 
 Every address the API takes is checked as a Stellar StrKey — an account
 (`G...`) or a contract (`C...`) — so a mistyped address is a `400
@@ -422,6 +437,13 @@ and each says in its description what has to be true for it to answer.
 ```bash
 curl -s localhost:8080/api/openapi.json | jq '.paths | keys'
 ```
+
+`GET /api/docs` renders that document in a browser. The page, its bootstrap
+and ReDoc's standalone bundle are all served by this service, so it works
+offline and needs no third-party CDN. The only CSP addition it needs is
+`worker-src 'self' blob:` for ReDoc's search worker; every other directive is
+helmet's default (`script-src 'self'`, `style-src 'self' https:
+'unsafe-inline'`, `img-src 'self' data:`).
 
 A test compares the document with the routes Express registers, so a route
 that is added without being documented fails the build.
@@ -766,7 +788,7 @@ re-exports the same declarations â€” types are shared, not copied, so backe
 and frontend cannot drift.
 
 ```ts
-import { PayflowClient, PayflowApiError } from "payflow-backend/client";
+import { PayflowClient, PayflowApiError } from "@mmm-pay/payflow-client";
 
 const api = new PayflowClient("http://localhost:8080");
 const { plans } = await api.plans({ merchant });
@@ -778,11 +800,17 @@ try {
 }
 ```
 
-Every endpoint is covered: `health`, `plans`, `plan`, `mandates`, `mandate`,
-`charges`, `due`, `merchantSummary`, `subscriberSummary`, `stats`. The
-package is private for now: the frontend depends on it from the repository
-(it is built by `npm run build` into `dist/client`), and publishing it to a
-registry is a release-time step for maintainers.
+Every endpoint is covered: `health`, `plans`, `plan`, `planStats`, `mandates`,
+`mandate`, `charges`, `due`, `merchantSummary`, `merchantForecast`,
+`merchantSubscribers`, `merchantChurn`, `merchantRevenue`, `subscriberSummary`,
+`stats`, `protocol`, `vault`, `vaultEvents`, and `keeper`.
+
+The client is published independently as
+[`@mmm-pay/payflow-client`](https://www.npmjs.com/package/@mmm-pay/payflow-client).
+It has no runtime dependencies and its own version and changelog under
+`client/`. `npm run build:client` compiles it; a `client-v*` tag runs the
+release workflow, which checks the tag against `client/package.json` and
+publishes it to npm with provenance.
 
 `tokens` breaks the same revenue down per token, joined through each charge's
 mandate and plan. With `TOKEN_ID` configured, the flat `totalCollected` and

@@ -394,15 +394,39 @@ export function getMandateMerchant(db: DatabaseSync, id: number): string | undef
   )?.merchant;
 }
 
-/** List charge events for a mandate ordered by ledger descending. */
+/**
+ * List charge events for a mandate ordered by ledger descending.
+ *
+ * `from` and `to` bound the charge's ledger close time in unix seconds and
+ * are both inclusive: `to` covers the whole second, so a charge stored at
+ * `to * 1000 + 1` milliseconds is inside the range. Without them the whole
+ * history is returned.
+ */
 export function listMandateCharges(
   db: DatabaseSync,
   mandateId: number,
   limit: number,
+  from?: number,
+  to?: number,
 ): ChargeRow[] {
+  const where = ["mandate_id = ?"];
+  const args: unknown[] = [mandateId];
+  if (from !== undefined) {
+    // `created_at` is unix milliseconds; the range is in seconds.
+    where.push("created_at >= ?");
+    args.push(from * 1000);
+  }
+  if (to !== undefined) {
+    where.push("created_at < ?");
+    args.push((to + 1) * 1000);
+  }
+  args.push(limit);
+  // The predicates are fixed fragments and the values are bound parameters,
+  // so no request data reaches the SQL text.
   return db
-    .prepare("SELECT * FROM charges WHERE mandate_id = ? ORDER BY ledger DESC LIMIT ?")
-    .all(mandateId, limit) as unknown as ChargeRow[];
+    // eslint-disable-next-line no-restricted-syntax
+    .prepare(`SELECT * FROM charges WHERE ${where.join(" AND ")} ORDER BY ledger DESC LIMIT ?`)
+    .all(...(args as never[])) as unknown as ChargeRow[];
 }
 
 /**
@@ -491,6 +515,49 @@ export function listMerchantChargesAfter(
         LIMIT ?`,
     )
     .all(merchant, from, to, key.created_at, key.tx_hash, key.mandate_id, limit) as unknown as MerchantChargeRow[];
+}
+
+/** One settled charge, as the subscriber CSV export reads it. */
+export interface SubscriberChargeRow {
+  tx_hash: string;
+  mandate_id: number;
+  merchant: string;
+  plan_id: number | null;
+  amount: string;
+  fee: string;
+  created_at: number;
+}
+
+/**
+ * One page of a subscriber's charges, oldest first, after `after` in
+ * (created_at, tx_hash, mandate_id) order. Keyset pages over the
+ * `charges_subscriber_created_at` index keep every query short, so a long
+ * export never holds the synchronous SQLite for its whole length. `plan_id`
+ * comes from the mandate; it is null only if a charge arrived before its
+ * mandate was projected. `from`/`to` bound `created_at` in unix milliseconds,
+ * half-open.
+ */
+export function listSubscriberChargesAfter(
+  db: DatabaseSync,
+  subscriber: string,
+  after: ChargeKey | null,
+  limit: number,
+  from = 0,
+  to = Number.MAX_SAFE_INTEGER,
+): SubscriberChargeRow[] {
+  const key = after ?? { created_at: -1, tx_hash: "", mandate_id: -1 };
+  return db
+    .prepare(
+      `SELECT c.tx_hash, c.mandate_id, c.merchant, m.plan_id, c.amount, c.fee, c.created_at
+         FROM charges c
+         LEFT JOIN mandates m ON m.id = c.mandate_id
+        WHERE c.subscriber = ?
+          AND c.created_at >= ? AND c.created_at < ?
+          AND (c.created_at, c.tx_hash, c.mandate_id) > (?, ?, ?)
+        ORDER BY c.created_at, c.tx_hash, c.mandate_id
+        LIMIT ?`,
+    )
+    .all(subscriber, from, to, key.created_at, key.tx_hash, key.mandate_id, limit) as unknown as SubscriberChargeRow[];
 }
 
 export function getVaultBalances(
