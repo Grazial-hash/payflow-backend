@@ -35,6 +35,8 @@ export interface SchemaObject {
   additionalProperties?: boolean | SchemaObject;
   /** A schema that must satisfy every listed schema. */
   allOf?: SchemaObject[];
+  /** A schema that must satisfy exactly one of the listed schemas. */
+  oneOf?: SchemaObject[];
   $ref?: string;
   minimum?: number;
   maximum?: number;
@@ -104,6 +106,40 @@ const API_V1 = "/api/v1";
 const API_ALIAS = "/api";
 
 /**
+ * The human-readable API reference, served at `/api/docs`.
+ *
+ * The page and its scripts are all served by this process: ReDoc's
+ * standalone bundle comes from the npm package at runtime, never from a CDN,
+ * so the documentation works offline and inside a locked-down network. The
+ * bootstrap is an external module rather than an inline script, which keeps
+ * the page compatible with the default `script-src 'self'` policy; it imports
+ * the bundle's `init` export (ReDoc 3 ships an ES module).
+ */
+export const DOCS_HTML = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Payflow API documentation</title>
+    <style>body { margin: 0; padding: 0; }</style>
+  </head>
+  <body>
+    <div id="redoc-container"></div>
+    <script type="module" src="/api/docs/docs.js"></script>
+  </body>
+</html>
+`;
+
+/**
+ * The page's bootstrap script: point ReDoc at the OpenAPI document this
+ * instance serves. ReDoc's own bundle is served beside it.
+ */
+export const DOCS_INIT_SCRIPT = `import { init } from "/api/docs/redoc.standalone.js";
+
+init("/api/openapi.json", {}, document.getElementById("redoc-container"));
+`;
+
+/**
  * The API changelog, which also carries the deprecation policy.
  *
  * It is linked from the document's `externalDocs` so a generated client keeps
@@ -146,6 +182,27 @@ const limitParameter = (): ParameterObject => ({
   required: false,
   description: "How many rows to return. Capped at 200; a larger value is not an error.",
   schema: { type: "integer", minimum: 1, maximum: 200, default: 50 },
+});
+
+/**
+ * A query parameter bounding a range: unix seconds or an ISO 8601
+ * date/date-time, both inclusive at the endpoints. A date-only `from` starts
+ * the day and a date-only `to` ends it, both in UTC.
+ */
+const dateBoundParameter = (name: "from" | "to", description: string): ParameterObject => ({
+  name,
+  in: "query",
+  required: false,
+  description,
+  schema: {
+    oneOf: [
+      { type: "integer", minimum: 0, description: "Unix seconds." },
+      {
+        type: "string",
+        description: "An ISO 8601 date or date-time with a timezone, e.g. `2026-10-01`.",
+      },
+    ],
+  },
 });
 
 /** A query parameter holding a number of days. */
@@ -363,7 +420,7 @@ function apiPaths(root: string): Record<string, PathItemObject> {
         tags: ["plans"],
         summary: "Statistics for one plan",
         description:
-          "Active and total mandates, cancellations, the gross amount collected and the average number of settled charges per mandate.",
+          "Active and total mandates, cancellations, the gross amount collected, the average number of settled charges per mandate, and the average and median lifetime value per subscriber net of the protocol fee.",
         operationId: `getPlanStats${operationSuffix(root)}`,
         parameters: [idParameter()],
         responses: {
@@ -495,9 +552,15 @@ function apiPaths(root: string): Record<string, PathItemObject> {
       get: {
         tags: ["mandates"],
         summary: "A mandate's settlement history",
-        description: "The charges settled for this mandate, newest first.",
+        description:
+          "The charges settled for this mandate, newest first. `from` and `to` filter by the charge's ledger close time and are both inclusive; `to` covers the whole second. Each accepts unix seconds or an ISO 8601 date/date-time. A date-only `2026-10-01` covers the whole UTC day, while `2026-10-01T12:00:00Z` is that exact instant. A `from` later than `to` is `400 invalid_request`.",
         operationId: `listMandateCharges${operationSuffix(root)}`,
-        parameters: [idParameter(), limitParameter()],
+        parameters: [
+          idParameter(),
+          limitParameter(),
+          dateBoundParameter("from", "Start of the range, inclusive. Unbounded when absent."),
+          dateBoundParameter("to", "End of the range, inclusive. Unbounded when absent."),
+        ],
         responses: {
           "200": {
             description: "The charges.",
@@ -509,6 +572,34 @@ function apiPaths(root: string): Record<string, PathItemObject> {
                     charges: { type: "array", items: { $ref: "#/components/schemas/Charge" } },
                   },
                   required: ["charges"],
+                },
+              },
+            },
+          },
+          "400": invalidRequest(),
+          "404": notFound("mandate_not_found", "mandate"),
+        },
+      },
+    },
+    [p("/mandates/{id}/attempts")]: {
+      get: {
+        tags: ["mandates"],
+        summary: "The keeper's charge attempts for a mandate",
+        description:
+          "Every attempt the keeper made to charge this mandate in the last 90 days, newest first: when, how it ended, the error code, the transaction hash and the backoff that followed. `skipped` means the vault could not cover the charge, so nothing was submitted.",
+        operationId: `listChargeAttempts${operationSuffix(root)}`,
+        parameters: [idParameter(), limitParameter()],
+        responses: {
+          "200": {
+            description: "The attempts.",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    attempts: { type: "array", items: { $ref: "#/components/schemas/ChargeAttempt" } },
+                  },
+                  required: ["attempts"],
                 },
               },
             },
@@ -872,6 +963,25 @@ function apiPaths(root: string): Record<string, PathItemObject> {
         },
       },
     },
+    [p("/merchants/{address}/cohorts")]: {
+      get: {
+        tags: ["merchants"],
+        summary: "A merchant's cohort retention",
+        description:
+          "Mandates grouped by the calendar bucket they started in, and for each cohort the share still active after 1, 2, 3... buckets: active means no cancellation, ending or completion before that bucket began. Starts and departures are bucketed by ledger close time. `limit` keeps the most recent cohorts (default 12, capped at 120); each cohort reports at most 120 periods.",
+        operationId: `getMerchantCohorts${operationSuffix(root)}`,
+        parameters: [addressParameter(), bucketParameter(), limitParameter()],
+        responses: {
+          "200": {
+            description: "The cohorts.",
+            content: {
+              "application/json": { schema: { $ref: "#/components/schemas/MerchantCohorts" } },
+            },
+          },
+          "400": invalidRequest(),
+        },
+      },
+    },
     [p("/merchants/{address}/revenue")]: {
       get: {
         tags: ["merchants"],
@@ -956,6 +1066,39 @@ function apiPaths(root: string): Record<string, PathItemObject> {
             content: {
               "application/json": { schema: { $ref: "#/components/schemas/Forecast" } },
             },
+          },
+          "400": invalidRequest(),
+        },
+      },
+    },
+    [p("/subscribers/{address}/charges.csv")]: {
+      get: {
+        tags: ["subscribers"],
+        summary: "Export a subscriber's payments as CSV",
+        description:
+          "Every settled charge paid by the subscriber, oldest first, as a CSV download (`Content-Disposition: attachment`). Columns: `date` (ledger close time, ISO 8601 UTC), `merchant`, `plan` (the mandate's plan id), `amount` (what the subscriber paid, the charge amount plus the fee), `fee` (the protocol's share) and `tx_hash`. Amounts are in token units with seven decimals. The range is half-open: a charge exactly at `to` is excluded.",
+        operationId: `exportSubscriberCharges${operationSuffix(root)}`,
+        parameters: [
+          addressParameter(),
+          {
+            name: "from",
+            in: "query",
+            required: false,
+            description: "Start of the range, in unix seconds. Unbounded when absent.",
+            schema: { type: "integer", minimum: 0 },
+          },
+          {
+            name: "to",
+            in: "query",
+            required: false,
+            description: "End of the range (exclusive), in unix seconds. Unbounded when absent.",
+            schema: { type: "integer", minimum: 0 },
+          },
+        ],
+        responses: {
+          "200": {
+            description: "The payments, one per row after a header row.",
+            content: { "text/csv": { schema: { type: "string" } } },
           },
           "400": invalidRequest(),
         },
@@ -1319,6 +1462,50 @@ function servicePaths(): Record<string, PathItemObject> {
         },
       },
     },
+    "/api/docs": {
+      get: {
+        tags: ["service"],
+        summary: "Human-readable API documentation",
+        description:
+          "A self-contained HTML page rendering this document with ReDoc. Its scripts are served by this process, so the page works without network access; the only CSP addition ReDoc needs is `worker-src 'self' blob:` for its search worker.",
+        operationId: "getDocs",
+        responses: {
+          "200": {
+            description: "The documentation page.",
+            content: { "text/html": { schema: { type: "string" } } },
+          },
+        },
+      },
+    },
+    "/api/docs/redoc.standalone.js": {
+      get: {
+        tags: ["service"],
+        summary: "The self-hosted ReDoc bundle",
+        description:
+          "ReDoc's standalone browser bundle, served from this process so `/api/docs` never reaches a third-party CDN.",
+        operationId: "getDocsRedocBundle",
+        responses: {
+          "200": {
+            description: "The ReDoc JavaScript bundle.",
+            content: { "text/javascript": { schema: { type: "string" } } },
+          },
+        },
+      },
+    },
+    "/api/docs/docs.js": {
+      get: {
+        tags: ["service"],
+        summary: "The documentation bootstrap",
+        description: "Points ReDoc at `/api/openapi.json`.",
+        operationId: "getDocsScript",
+        responses: {
+          "200": {
+            description: "The bootstrap JavaScript.",
+            content: { "text/javascript": { schema: { type: "string" } } },
+          },
+        },
+      },
+    },
     "/admin/reindex": {
       post: {
         tags: ["admin"],
@@ -1673,6 +1860,16 @@ function componentSchemas(): Record<string, SchemaObject> {
         totalCollected: amount(),
         totalCharges: { type: "integer" },
         averageChargesPerMandate: { type: "number" },
+        averageLtv: {
+          ...amount(),
+          description:
+            "Mean lifetime value per subscriber, net of the protocol fee: the sum of each subscriber's charge amounts on this plan, averaged over every subscriber with a mandate (one never charged counts as 0). Rounded down; \"0\" when the plan has no mandates.",
+        },
+        medianLtv: {
+          ...amount(),
+          description:
+            "Median lifetime value per subscriber, net of the protocol fee, over the same subscribers; with an even count, the mean of the middle two rounded down.",
+        },
       },
       required: [
         "planId",
@@ -1682,7 +1879,41 @@ function componentSchemas(): Record<string, SchemaObject> {
         "totalCollected",
         "totalCharges",
         "averageChargesPerMandate",
+        "averageLtv",
+        "medianLtv",
       ],
+    },
+    ChargeAttempt: {
+      type: "object",
+      properties: {
+        id: { type: "integer" },
+        mandateId: { type: "integer" },
+        attemptedAt: { type: "integer", description: "When the keeper made the attempt, in unix seconds." },
+        result: {
+          type: "string",
+          enum: ["settled", "failed", "skipped"],
+          description: "`skipped`: the vault could not cover the charge, so nothing was submitted.",
+        },
+        errorCode: {
+          type: ["string", "null"],
+          description:
+            "Why the attempt did not settle: an RPC status (`TRY_AGAIN_LATER`, `FAILED`, `NOT_FOUND`), a transaction result code (`txBadSeq`), a Soroban host error (`Error(Contract, #3)`), `INSUFFICIENT_BALANCE`, `CHARGE_MANY_SKIPPED` or `SUBMIT_FAILED`. Null when it settled.",
+        },
+        txHash: { type: ["string", "null"] },
+        shortfall: {
+          ...amount(),
+          description: "Only on a `skipped` attempt: what the vault was missing.",
+        },
+        failures: {
+          type: "integer",
+          description: "Consecutive failed attempts after this one; 0 once a charge settles.",
+        },
+        retryAt: {
+          type: ["integer", "null"],
+          description: "When the keeper tries again, in unix seconds; null after a settlement.",
+        },
+      },
+      required: ["id", "mandateId", "attemptedAt", "result", "errorCode", "txHash", "failures", "retryAt"],
     },
     TokenRevenue: {
       type: "object",
@@ -1713,8 +1944,13 @@ function componentSchemas(): Record<string, SchemaObject> {
         mandateCount: { type: "integer" },
         chargeCount: { type: "integer" },
         totalCollected: amount(),
+        ltv: {
+          ...amount(),
+          description:
+            "Lifetime value net of the protocol fee: what this subscriber has paid the merchant across their mandates.",
+        },
       },
-      required: ["subscriber", "mandateCount", "chargeCount", "totalCollected"],
+      required: ["subscriber", "mandateCount", "chargeCount", "totalCollected", "ltv"],
     },
     MerchantSubscribers: {
       type: "object",
@@ -1760,6 +1996,36 @@ function componentSchemas(): Record<string, SchemaObject> {
         totals: { $ref: "#/components/schemas/ChurnTotals" },
       },
       required: ["merchant", "bucket", "buckets", "totals"],
+    },
+    Cohort: {
+      type: "object",
+      properties: {
+        cohort: { type: "string", description: "The label of the bucket the mandates started in, in UTC." },
+        size: { type: "integer", description: "Mandates that started in the bucket." },
+        retention: {
+          type: "array",
+          description: "One entry per bucket that has begun since the cohort's, oldest first.",
+          items: {
+            type: "object",
+            properties: {
+              period: { type: "integer", minimum: 1, description: "Buckets after the cohort's own." },
+              active: { type: "integer", description: "Mandates with no departure before that bucket began." },
+              share: { type: "number", minimum: 0, maximum: 1, description: "`active` ÷ `size`." },
+            },
+            required: ["period", "active", "share"],
+          },
+        },
+      },
+      required: ["cohort", "size", "retention"],
+    },
+    MerchantCohorts: {
+      type: "object",
+      properties: {
+        merchant: { type: "string", description: ADDRESS_DESCRIPTION },
+        bucket: { type: "string", enum: ["day", "week", "month"] },
+        cohorts: { type: "array", items: { $ref: "#/components/schemas/Cohort" } },
+      },
+      required: ["merchant", "bucket", "cohorts"],
     },
     RevenueBucket: {
       type: "object",

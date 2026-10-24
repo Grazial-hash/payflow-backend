@@ -106,6 +106,13 @@ export interface PageQuery {
   limit?: number;
 }
 
+export interface ChargesQuery extends PageQuery {
+  /** Start of the range, inclusive: unix seconds or an ISO 8601 date. */
+  from?: number | string;
+  /** End of the range, inclusive: unix seconds or an ISO 8601 date. */
+  to?: number | string;
+}
+
 export interface PayflowClientOptions {
   /** Base URL of the API, e.g. `https://payflow-backend.onrender.com`. */
   baseUrl: string;
@@ -183,7 +190,7 @@ export class PayflowClient {
     return this.get<MandateRow>(`${API_PATH}/mandates/${id}`);
   }
 
-  charges(mandateId: number, query: PageQuery = {}): Promise<ChargePage> {
+  charges(mandateId: number, query: ChargesQuery = {}): Promise<ChargePage> {
     return this.get<ChargePage>(`${API_PATH}/mandates/${mandateId}/charges`, query);
   }
 

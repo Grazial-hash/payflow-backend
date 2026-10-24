@@ -72,6 +72,8 @@ release that ships them numbers them here.
   `api-schema`; a consumer validates its fixtures against the same schemas
   `test/consumer.test.ts` checks the golden responses against.
 - `GET /api/openapi.json` — an OpenAPI 3.1 description of every route.
+- `GET /api/docs` — a human-readable rendering of that description, with the
+  ReDoc bundle self-hosted so it works offline.
 - `GET /ready` — a readiness probe answering `503` while the projection trails
   the network by more than 120 ledgers. `/health` stays a liveness probe.
 - `GET /metrics` — Prometheus metrics, only when `METRICS_ENABLED=true`.
@@ -96,7 +98,14 @@ release that ships them numbers them here.
   longest overdue first (#146).
 - `GET /api/subscribers/:address/upcoming` — charges due over the next N days,
   with their projected times.
+- `GET /api/subscribers/:address/charges.csv` — the subscriber's settled
+  payments as a CSV download: date, merchant, plan, amount, fee and tx hash.
+  `from`/`to` accept unix seconds.
 - `GET /api/mandates?ids=` — up to 100 mandates in one request.
+- `GET /api/mandates/:id/charges?from=&to=` — bound the settlement history by
+  ledger close time. Each bound accepts unix seconds or an ISO 8601
+  date/date-time; a date-only bound covers its whole UTC day. Both are
+  inclusive. An invalid value or `from > to` is `400 invalid_request`.
 - `POST /api/webhooks` — register a URL for signed `charged` events.
 - `POST /api/webhooks/:id/rotate` — replace a webhook's signing secret. During
   the overlap `Payflow-Signature` lists two signatures,
@@ -110,6 +119,21 @@ release that ships them numbers them here.
 - `GET /api/auth` and `POST /api/auth` — SEP-10 sign-in. Every webhook route
   also accepts the issued JWT as `Authorization: Bearer <token>`; signed
   messages keep working unchanged.
+- `GET /api/merchants/:address/cohorts` — per signup cohort (`day`, `week` or
+  `month` of ledger close time), the mandates still active after 1, 2, 3...
+  buckets, as `active` and `share` (#142).
+- `GET /api/plans/:id/stats` gained `averageLtv` and `medianLtv`, and
+  `GET /api/merchants/:address/subscribers` gained `ltv` per subscriber:
+  lifetime value net of the protocol fee, as decimal strings. `ltv` equals
+  `totalCollected`, which already summed the merchant's net amounts (#143).
+- `GET /api/mandates/:id/attempts` — the keeper's charge attempts for the
+  mandate over the last 90 days, newest first: `result` (`settled`, `failed`
+  or `skipped`), `errorCode`, `txHash`, `shortfall` on a skipped attempt, and
+  the backoff that followed (#144).
+- Webhooks receive two new `event` values from the keeper: `charge.failing`
+  on a mandate's third consecutive failed attempt (with `shortfall`,
+  `next_retry_at` and `error_code`) and `charge.recovered` when it next
+  settles (with `tx_hash`), each once per streak (#145).
 - `/api/<network>/...` — every route again, per configured network.
 - `/api/mandates` and `/api/plans` accept `?cursor=` and return `nextCursor`.
 - `/api/stats` reports charge volume and fees; `/api/due` gained `funded`;

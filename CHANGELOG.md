@@ -19,6 +19,26 @@ All notable changes to payflow-backend. The format follows
 - **A dev container (#176).** `.devcontainer/` uses Node 22, runs `npm ci`,
   installs the Stellar CLI and recommends the project's editor extensions, so
   a Codespace needs no host setup.
+- **A readable API reference (#162).** `GET /api/docs` renders the OpenAPI
+  document with ReDoc. The page, its bootstrap and the ReDoc bundle are all
+  served by the service, so the reference works offline with no third-party
+  CDN. The CSP is widened only with `worker-src 'self' blob:` for ReDoc's
+  search worker; every other directive stays helmet's default.
+- **The typed client as a standalone npm package (#163).**
+  `@mmm-pay/payflow-client` is built from the same response types as the
+  backend and has no runtime dependencies. It keeps its own version and
+  changelog under `client/`, and `client-v*` releases publish it with npm
+  provenance.
+- **A mandate's charges can be filtered by date (#164).**
+  `GET /api/mandates/:id/charges` accepts `from` and `to`, as unix seconds or
+  ISO 8601 dates (a date covers its whole UTC day), and returns only charges
+  whose ledger close time falls in the inclusive range. A `from` after `to` is
+  `400 invalid_request`, and the filter is served by a
+  `(mandate_id, created_at)` index.
+- **A subscriber's payments can be exported as CSV (#165).**
+  `GET /api/subscribers/:address/charges.csv` streams every settled charge
+  oldest first, with date, merchant, plan, amount, fee and tx hash. Amounts
+  are decimal strings in token units, and `from`/`to` bound the range.
 - **Protocol fee revenue over time (#149).** `GET /api/protocol/fees` sums
   charge fees per `day`, `week` or `month` bucket of ledger close time,
   reading only the requested window through a covering index on

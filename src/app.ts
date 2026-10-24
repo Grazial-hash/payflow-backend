@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import cors from "cors";
 import { rateLimit } from "express-rate-limit";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
@@ -10,7 +12,7 @@ import type { Config, NetworkConfig } from "./config.ts";
 import type { IndexerStatus } from "./indexer.ts";
 import { buildAdminRoutes, type AdminHooks, type AdminToken } from "./routes/admin.ts";
 import { buildApiRouter, MerchantSummaryCache } from "./routes/index.ts";
-import { buildOpenApiDocument } from "./routes/openapi.ts";
+import { buildOpenApiDocument, DOCS_HTML, DOCS_INIT_SCRIPT } from "./routes/openapi.ts";
 import { asReader, TokenMetadataService } from "./lib/tokens.ts";
 import { sendApiError } from "./routes/errors.ts";
 import type { HealthResponse } from "./routes/types.ts";
@@ -18,9 +20,19 @@ import type { RpcStatus } from "./lib/stellar.ts";
 import type { WebhookDispatcher } from "./lib/webhooks.ts";
 import type { Sep10Auth } from "./routes/auth.ts";
 import { logger } from "./lib/logger.ts";
-import { metrics, publishIndexerMetrics } from "./lib/metrics.ts";
+import { metrics, publishBusinessMetrics, publishIndexerMetrics } from "./lib/metrics.ts";
 import { withSpan } from "./lib/telemetry.ts";
 import { getVersionInfo } from "./lib/version.ts";
+
+/**
+ * ReDoc's standalone browser bundle, read once when the app module loads.
+ *
+ * It ships in the `redoc` package that `npm ci` installs, so `/api/docs`
+ * serves the documentation from this process instead of a third-party CDN.
+ * Reading it here keeps the request handler free of filesystem work.
+ */
+const require = createRequire(import.meta.url);
+const REDOC_BUNDLE = readFileSync(require.resolve("redoc/bundles/redoc.standalone.js"), "utf8");
 
 /**
  * The shape of a failure that is safe to put in a log line.
@@ -244,6 +256,18 @@ export function createApp(
   app.set("trust proxy", 1);
   app.use(helmet());
 
+  // ReDoc runs its search index in a web worker created from a Blob URL.
+  // Every other directive stays helmet's default: the bundle and the
+  // bootstrap are same-origin modules (`script-src 'self'`), and ReDoc's
+  // injected styles are covered by the default `style-src 'unsafe-inline'`.
+  // This is the only addition the documentation page needs.
+  app.use(
+    "/api/docs",
+    helmet.contentSecurityPolicy({
+      directives: { "worker-src": ["'self'", "blob:"] },
+    }),
+  );
+
   app.use(
     pinoHttp({
       logger,
@@ -309,14 +333,34 @@ export function createApp(
     res.json(openApiDocument);
   });
 
+  // A readable rendering of the document above. The page, the bootstrap and
+  // ReDoc's bundle are all served here: no request leaves this host, so the
+  // documentation works offline and without opening the CSP to a CDN.
+  app.get("/api/docs", (_req, res) => {
+    res.setHeader("Cache-Control", "public, max-age=300");
+    res.type("html").send(DOCS_HTML);
+  });
+  app.get("/api/docs/docs.js", (_req, res) => {
+    res.setHeader("Cache-Control", "public, max-age=300");
+    res.type("text/javascript").send(DOCS_INIT_SCRIPT);
+  });
+  app.get("/api/docs/redoc.standalone.js", (_req, res) => {
+    res.setHeader("Cache-Control", "public, max-age=3600");
+    res.type("text/javascript").send(REDOC_BUNDLE);
+  });
+
   // Prometheus metrics. Opt-in: without METRICS_ENABLED the path does not
   // exist and answers 404 like any other unknown route.
   if (config.METRICS_ENABLED) {
     app.get("/metrics", (_req, res) => {
       // The gauges describe the projection as it stands, not as it stood
-      // after the last pass, so they are refreshed before the render.
+      // after the last pass, so they are refreshed before the render. The
+      // business gauges are re-read the same way — one short indexed query
+      // per network — which also serves a deployment whose API answers
+      // without an attached indexer.
       for (const rt of runtimes) {
         if (rt.indexer) publishIndexerMetrics(rt.indexer, rt.config.name);
+        publishBusinessMetrics(rt.db, rt.config.name);
       }
       res.setHeader("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
       res.setHeader("Cache-Control", "no-store");
